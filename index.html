@@ -4306,14 +4306,16 @@ function buildKnowledgeChunks() {
   document.querySelectorAll('section[id]').forEach(sec => {
     const titleEl = sec.querySelector('.section-title');
     const title = titleEl ? titleEl.textContent.trim() : sec.id;
-    const text = normalizeText(sec.textContent || '');
-    if (!text) return;
-    const maxLen = 700;
-    for (let i = 0; i < text.length; i += maxLen) {
+    const rawText = (sec.textContent || '').replace(/\s+/g, ' ').trim();
+    const normText = normalizeText(rawText);
+    if (!normText) return;
+    const maxLen = 420;
+    for (let i = 0; i < normText.length; i += maxLen) {
       data.push({
         id: sec.id,
         title,
-        text: text.slice(i, i + maxLen)
+        normText: normText.slice(i, i + maxLen),
+        rawText: rawText.slice(i, i + maxLen)
       });
     }
   });
@@ -4328,13 +4330,24 @@ function retrieveContext(question, topK = 5) {
   const scored = knowledgeChunks.map(ch => {
     let score = 0;
     for (const tk of tokens) {
-      if (ch.text.includes(tk)) score += 1;
+      if (ch.normText.includes(tk)) score += 1;
     }
     return { ...ch, score };
   }).filter(x => x.score > 0)
     .sort((a, b) => b.score - a.score)
     .slice(0, topK);
   return scored;
+}
+
+function localFallbackAnswer(question, contexts) {
+  if (!contexts.length) {
+    return 'このサイト内で該当情報を見つけられませんでした。質問文を短くして、用語（例: SPT、ベースアップ評価料）を入れて再質問してください。';
+  }
+  const excerpts = contexts
+    .slice(0, 2)
+    .map(c => `${c.title}: ${c.rawText.slice(0, 140)}...`)
+    .join('\n');
+  return `現在API上限のため、サイト内情報だけで暫定回答します。\n質問: ${question}\n\n関連箇所:\n${excerpts}\n\n必要なら1〜2分後に再送するとAI要約で回答できます。`;
 }
 
 async function askGemini(question, contexts, apiKey) {
@@ -4348,7 +4361,7 @@ async function askGemini(question, contexts, apiKey) {
 ${question}
 
 コンテキスト:
-${contexts.map((c, i) => `[${i + 1}] (${c.title}) ${c.text}`).join('\n')}
+${contexts.map((c, i) => `[${i + 1}] (${c.title}) ${c.rawText}`).join('\n')}
 `.trim();
 
   const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${encodeURIComponent(apiKey)}`;
@@ -4359,6 +4372,7 @@ ${contexts.map((c, i) => `[${i + 1}] (${c.title}) ${c.text}`).join('\n')}
   const retryableStatus = new Set([429, 500, 503]);
   let waitMs = 1200;
   let lastStatus = 0;
+  let retryAfterSec = 0;
 
   for (let attempt = 0; attempt < 3; attempt += 1) {
     const res = await fetch(url, {
@@ -4367,6 +4381,8 @@ ${contexts.map((c, i) => `[${i + 1}] (${c.title}) ${c.text}`).join('\n')}
       body: JSON.stringify(payload)
     });
     lastStatus = res.status;
+    const headerRetry = Number(res.headers.get('retry-after') || '0');
+    if (!Number.isNaN(headerRetry) && headerRetry > 0) retryAfterSec = headerRetry;
     if (res.ok) {
       const json = await res.json();
       const text = json?.candidates?.[0]?.content?.parts?.map(p => p.text || '').join('\n').trim();
@@ -4379,15 +4395,43 @@ ${contexts.map((c, i) => `[${i + 1}] (${c.title}) ${c.text}`).join('\n')}
   }
 
   if (lastStatus === 429) {
-    throw new Error('429: 無料枠の上限または短時間の送信過多です。1〜2分待って再試行してください。');
+    throw new Error(`429:${retryAfterSec}`);
   }
   throw new Error(`Gemini API error: ${lastStatus}`);
 }
 
 let lastChatSentAt = 0;
+let rateLimitUntil = 0;
+let cooldownTimer = 0;
+
+function startCooldown(seconds) {
+  const sec = Math.max(20, Math.min(180, Math.floor(seconds || 90)));
+  rateLimitUntil = Date.now() + (sec * 1000);
+  chatbotSend.disabled = true;
+  chatbotSend.textContent = `待機 ${sec}s`;
+  if (cooldownTimer) clearInterval(cooldownTimer);
+  cooldownTimer = setInterval(() => {
+    const remain = Math.max(0, Math.ceil((rateLimitUntil - Date.now()) / 1000));
+    if (remain > 0) {
+      chatbotSend.disabled = true;
+      chatbotSend.textContent = `待機 ${remain}s`;
+    } else {
+      clearInterval(cooldownTimer);
+      cooldownTimer = 0;
+      chatbotSend.disabled = false;
+      chatbotSend.textContent = '送信';
+    }
+  }, 1000);
+}
+
 async function handleChatSend() {
   const q = chatbotInput.value.trim();
   if (!q) return;
+  if (Date.now() < rateLimitUntil) {
+    const remain = Math.ceil((rateLimitUntil - Date.now()) / 1000);
+    addChatMessage('bot', `現在クールダウン中です。あと${remain}秒待って再送してください。`);
+    return;
+  }
   const now = Date.now();
   if (now - lastChatSentAt < 2500) {
     addChatMessage('bot', '送信間隔が短すぎます。2〜3秒空けて再送してください。');
@@ -4420,9 +4464,20 @@ async function handleChatSend() {
       addChatMessage('bot', answer, sourceList);
     }
   } catch (e) {
-    addChatMessage('bot', `回答取得中にエラーが発生しました: ${e.message}`, sourceList);
+    const msg = String(e?.message || '');
+    if (msg.startsWith('429:')) {
+      const retrySec = Number(msg.split(':')[1] || '0');
+      startCooldown(retrySec || 90);
+      addChatMessage('bot', localFallbackAnswer(q, contexts), sourceList);
+      addChatMessage('bot', `429エラーのため${retrySec || 90}秒の待機を設定しました。待機後に再送できます。`);
+    } else {
+      addChatMessage('bot', `回答取得中にエラーが発生しました: ${msg}`, sourceList);
+    }
   } finally {
-    chatbotSend.disabled = false;
+    if (Date.now() >= rateLimitUntil) {
+      chatbotSend.disabled = false;
+      chatbotSend.textContent = '送信';
+    }
   }
 }
 
