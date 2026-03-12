@@ -1008,7 +1008,16 @@ body.side-menu-open { overflow:hidden; }
   align-items:center;
   justify-content:space-between;
 }
-.chatbot-title { font-size:13px; font-weight:700; }
+.chatbot-title { font-size:13px; font-weight:700; display:flex; align-items:center; gap:8px; }
+.chatbot-title #chatbotBuildTag {
+  font-family:'Source Code Pro',monospace;
+  font-size:10px;
+  color:#6f7f95;
+  background:#f1f5fb;
+  border:1px solid #dce5f3;
+  border-radius:999px;
+  padding:1px 8px;
+}
 .chatbot-close {
   border:none;
   background:rgba(255,255,255,0.16);
@@ -4092,7 +4101,7 @@ body.side-menu-open { overflow:hidden; }
 <button class="chatbot-fab" id="chatbotFab" type="button">AIに質問</button>
 <section class="chatbot-panel" id="chatbotPanel" aria-label="サイト内AIチャット">
   <div class="chatbot-head">
-    <div class="chatbot-title">サイト内AIチャット（テスト）</div>
+    <div class="chatbot-title">サイト内AIチャット（テスト）<span id="chatbotBuildTag"></span></div>
     <button class="chatbot-close" id="chatbotClose" type="button">✕</button>
   </div>
   <div class="chatbot-body" id="chatbotBody">
@@ -4263,8 +4272,11 @@ const chatbotClose = document.getElementById('chatbotClose');
 const chatbotBody = document.getElementById('chatbotBody');
 const chatbotInput = document.getElementById('chatbotInput');
 const chatbotSend = document.getElementById('chatbotSend');
+const chatbotBuildTag = document.getElementById('chatbotBuildTag');
 const geminiApiKeyInput = document.getElementById('geminiApiKey');
 const GEMINI_KEY_STORAGE = 'gemini_api_key_r8_lab';
+const CHATBOT_BUILD = 'b20260312-2';
+if (chatbotBuildTag) chatbotBuildTag.textContent = CHATBOT_BUILD;
 
 function openChatbot() { chatbotPanel.classList.add('open'); }
 function closeChatbot() { chatbotPanel.classList.remove('open'); }
