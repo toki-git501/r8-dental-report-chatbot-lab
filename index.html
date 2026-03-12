@@ -4318,6 +4318,7 @@ function buildKnowledgeChunks() {
   document.querySelectorAll('section[id]').forEach(sec => {
     const titleEl = sec.querySelector('.section-title');
     const title = titleEl ? titleEl.textContent.trim() : sec.id;
+    const sourceType = sec.id === 'references' ? 'references' : 'section';
     const rawText = (sec.textContent || '').replace(/\s+/g, ' ').trim();
     const normText = normalizeText(rawText);
     if (!normText) return;
@@ -4326,8 +4327,30 @@ function buildKnowledgeChunks() {
       data.push({
         id: sec.id,
         title,
+        sourceType,
         normText: normText.slice(i, i + maxLen),
         rawText: rawText.slice(i, i + maxLen)
+      });
+    }
+  });
+
+  // Include hidden modal detail texts so fallback can answer from richer content.
+  document.querySelectorAll('.modal-overlay[id]').forEach(modal => {
+    const modalId = modal.getAttribute('id') || '';
+    const h3 = modal.querySelector('.modal-header h3');
+    const title = h3 ? h3.textContent.trim() : modalId;
+    const mappedSectionId = modalId.startsWith('s3-') ? 'compare' : 'summary';
+    const bodyText = (modal.querySelector('.modal-body')?.textContent || '').replace(/\s+/g, ' ').trim();
+    const normText = normalizeText(bodyText);
+    if (!normText) return;
+    const maxLen = 420;
+    for (let i = 0; i < normText.length; i += maxLen) {
+      data.push({
+        id: mappedSectionId,
+        title,
+        sourceType: 'modal',
+        normText: normText.slice(i, i + maxLen),
+        rawText: bodyText.slice(i, i + maxLen)
       });
     }
   });
@@ -4346,12 +4369,15 @@ function retrieveContext(question, topK = 5) {
     if (bi.length === 2) charTokens.push(bi);
   }
   const tokens = Array.from(new Set([...phraseTokens, ...charTokens])).slice(0, 60);
+  const askForSource = /出典|ソース|参考|資料|リンク|pdf|根拠/.test(question.toLowerCase());
   const scored = knowledgeChunks.map(ch => {
     let score = 0;
     for (const tk of tokens) {
       if (ch.normText.includes(tk)) score += tk.length >= 3 ? 3 : 1;
       if (ch.title && normalizeText(ch.title).includes(tk)) score += 4;
     }
+    if (ch.sourceType === 'modal') score += 2;
+    if (ch.sourceType === 'references' && !askForSource) score -= 6;
     return { ...ch, score };
   }).filter(x => x.score > 0)
     .sort((a, b) => b.score - a.score)
@@ -4377,11 +4403,16 @@ function localFallbackAnswer(question, contexts) {
   if (!contexts.length) {
     return '現在API上限のため、サイト内の関連箇所を特定できませんでした。質問を1テーマに絞って再送してください（例: 「ベースアップ評価料ⅠとⅡの違い」「SPTの算定要件」）。';
   }
-  const excerpts = contexts
-    .slice(0, 2)
-    .map(c => `${c.title}: ${c.rawText.slice(0, 140)}...`)
-    .join('\n');
-  return `現在API上限のため、サイト内情報だけで暫定回答します。\n質問: ${question}\n\n関連箇所:\n${excerpts}\n\n必要なら1〜2分後に再送するとAI要約で回答できます。`;
+  const picked = [];
+  const seenTitles = new Set();
+  for (const c of contexts) {
+    if (seenTitles.has(c.title)) continue;
+    seenTitles.add(c.title);
+    const snippet = c.rawText.slice(0, 120).trim();
+    if (snippet) picked.push(`・${c.title}: ${snippet}...`);
+    if (picked.length >= 3) break;
+  }
+  return `現在API上限のため、サイト内情報だけで暫定回答します。\n質問: ${question}\n\n要点候補:\n${picked.join('\n')}\n\n1〜2分後に再送するとAI要約で回答できます。`;
 }
 
 async function askGemini(question, contexts, apiKey) {
